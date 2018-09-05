@@ -19,21 +19,6 @@ instance Applicative (Parser i) where
       (Nothing, _)    -> (Nothing, input)
     (Nothing, _) -> (Nothing, input)
 
-satisfy :: (Char -> Bool) -> Parser String Char
-satisfy predicate = Parser $ \input -> case input of
-  ""       -> (Nothing, input)
-  (c:rest) -> if predicate c then (Just c, rest) else (Nothing, input)
-
-digit :: Parser String Int
-digit = digitToInt <$> satisfy isDigit
-
-char :: Char -> Parser String Char
-char x = satisfy (x ==)
-
-word :: String -> Parser String String
-word ""    = Parser $ \input -> (Just "", input)
-word (c:s) = ((:) <$> char c) <*> word s
-
 instance Alternative (Parser i) where
   empty = Parser $ \input -> (Nothing, input)
   p1 <|> p2 = Parser $ \input -> case runParser p1 input of
@@ -42,11 +27,33 @@ instance Alternative (Parser i) where
       x            -> x
     x -> x
 
+satisfy :: (a -> Bool) -> Parser [a] a
+satisfy predicate = Parser $ \input -> case input of
+  []       -> (Nothing, input)
+  (c:rest) -> if predicate c then (Just c, rest) else (Nothing, input)
+
+parseMaybeList :: (a -> Maybe b) -> Parser [a] b
+parseMaybeList f = Parser $ \input -> case input of
+  []       -> (Nothing, input)
+  (c:rest) -> case f c of
+    Nothing   -> (Nothing, input)
+    justValue -> (justValue, rest)
+
+digit :: Parser String Int
+digit = digitToInt <$> satisfy isDigit
+
+token :: Eq a => a -> Parser [a] a
+token x = satisfy (x ==)
+
+multiToken :: Eq a => [a] -> Parser [a] [a]
+multiToken []    = Parser $ \input -> (Just [], input)
+multiToken (c:s) = ((:) <$> token c) <*> multiToken s
+
 sepBy :: Parser i v -> Parser i s -> Parser i [v]
 sepBy pat sep = (:) <$> pat <*> many (sep *> pat) <|> pure []
 
-oneOf :: String -> Parser String Char
-oneOf = foldr (<|>) empty . (char <$>)
+oneOf :: Eq a => [a] -> Parser [a] a
+oneOf = foldr (<|>) empty . (token <$>)
 
 spaces :: Parser String String
 spaces = some $ oneOf " \t\n"
@@ -57,19 +64,41 @@ data LispExpression
   = LispNumber Int
   | LispSymbol String
   | LispList [LispExpression]
+  | LispLambda [String] LispExpression
   deriving Show
 
-someOneOf :: String -> Parser String String
-someOneOf = some . oneOf
+mapSomeOf :: (String -> a) -> String -> Parser String a
+mapSomeOf f = (f <$>) . some . oneOf
 
 lispNumber :: Parser String LispExpression
-lispNumber = LispNumber . read <$> someOneOf ['0'..'9']
+lispNumber = mapSomeOf (LispNumber . read) ['0'..'9']
 
 lispSymbol :: Parser String LispExpression
-lispSymbol = LispSymbol <$> someOneOf "1234567890qwertyuiopasdfghjklzxcvbnmQWERTYUIOPASDFGHJKLZXCVBNM-!?+*"
+lispSymbol = mapSomeOf LispSymbol "1234567890qwertyuiopasdfghjklzxcvbnmQWERTYUIOPASDFGHJKLZXCVBNM-!?+*"
 
 lispList :: Parser String LispExpression
-lispList = LispList <$> (char '(' *> sepBy lispExpression spaces <* char ')')
+lispList = LispList <$> (token '(' *> sepBy lispExpression spaces <* token ')')
+
+-- listOfSymbols :: Parser String [String]
+-- listOfSymbols = LispList <$> sepBy lispSymbol spaces
+
+-- dottedList :: Parser String [String]
+-- dottedList = lispList
+
+-- lispArguments :: Parser String LispExpression
+-- lispArguments = lispSymbol <|> dottedList <|> listOfSymbols
+
+-- lispLambda :: Parser String LispExpression
+-- lispLambda = LispList <$> (char '(' *> multiToken "lambda" *>  <*> sepBy lispExpression spaces <* char ')')
+
+lispLambda :: Parser LispExpression LispExpression
+lispLambda = parseMaybe p
+  where p (LispList [(LispSymbol "lambda"), (LispList maybeArgs), body])
+          = fmap (`LispLambda` body) (getArgs maybeArgs)
+        p _ = Nothing
+        getArgs []                    = Just []
+        getArgs ((LispSymbol x):rest) = (x:) <$> getArgs rest
+        getArgs _                     = Nothing
 
 lispExpression :: Parser String LispExpression
 lispExpression = lispNumber <|> lispSymbol <|> lispList
